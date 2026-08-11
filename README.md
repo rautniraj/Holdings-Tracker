@@ -11,122 +11,89 @@ Dhan shows ST/LT classification only after conversion. This project reconstructs
 | Phase | Scope | Status |
 |-------|--------|--------|
 | **Phase 1** | Dhan API & authentication validation | **Complete** |
-| Phase 2 | FIFO lot engine + CSV validation | Not started |
-| Phase 3 | Neon PostgreSQL + GitHub Actions | Not started |
-| Phase 4 | NTFY notifications + ops hardening | Not started |
+| **Phase 2** | Neon PostgreSQL + trade/holdings ingestion | **Complete** |
+| Phase 3 | FIFO lot engine + CSV validation | Not started |
+| Phase 4 | GitHub Actions daily cron | Not started |
+| Phase 5 | NTFY notifications + ops hardening | Not started |
 
 Planning reference: `Dhan-Project---Serious-Problem-Troubleshooting-2026-08-11.html`  
 API reference (local export): `dhan-api-docs.md`
 
 ---
 
-## Phase 1 — what was built and why
+## Phase 1 — Dhan API & authentication
 
-Phase 1 proves we can **reliably talk to Dhan** before building business logic. No database, FIFO engine, notifications, or GitHub Actions yet.
+Phase 1 proves we can **reliably talk to Dhan** before building business logic.
 
-### Goal
-
-Validate end-to-end:
+### Validated
 
 1. TOTP-based authentication → access token
 2. `GET /profile` (token sanity check)
 3. `GET /holdings` (current portfolio snapshot)
 4. `GET /trades/{from-date}/{to-date}/{page-number}` (paginated trade history)
 
-### Design decisions
+### Key design decisions
 
-#### 1. TOTP authentication (not manual 24h web token)
+**TOTP authentication** — fully automatable, no browser login, no static IP for read-only APIs.
 
-Dhan supports several auth methods. We chose **TOTP → `generateAccessToken`** because:
+**Token reuse (development)** — with `DHAN_REUSE_ACCESS_TOKEN=true`, a valid token in `output/auth_response.json` is reused across runs (checked via `expiryTime` + `GET /profile`). Set to `false` in production.
 
-- Fully automatable (no browser login each day)
-- Suitable for future GitHub Actions daily cron
-- No static IP required for read-only APIs (Trade History, Holdings, Profile)
+**Read-only APIs only** — Trade History is the authoritative event stream; Holdings is for reconciliation.
 
-**How it works each run:**
+**Retry policy** — configurable linear retries, no exponential backoff (per approved plan).
 
-```
-DHAN_TOTP_SECRET (stored in .env)
-        ↓
-pyotp generates current 6-digit TOTP
-        ↓
-POST https://auth.dhan.co/app/generateAccessToken
-        ↓
-accessToken (~24h validity)
-        ↓
-used for this run only, then discarded
-```
+**Trade history pagination** — start at page `0`, loop until empty array.
 
-You do **not** open an authenticator app manually. The secret is stored once; the code is generated programmatically.
-
-**Token reuse:** With `DHAN_REUSE_ACCESS_TOKEN=true` (development), a valid token in `output/auth_response.json` is reused across runs. Set to `false` in production — each run generates a fresh token with no disk cache.
-
-#### 2. Read-only APIs only
-
-This project never places, modifies, or cancels orders. Static IP whitelisting is **not** required for our endpoints.
-
-| Endpoint | Role in project |
-|----------|-----------------|
-| `POST …/generateAccessToken` | Authentication |
-| `GET /profile` | Verify token + account setup |
-| `GET /holdings` | Reconciliation (Phase 2+) — compare our calculated qty vs Dhan |
-| `GET /trades/…` | **Primary data source** — reconstruct lots from BUY/SELL history |
-
-Trade History is the authoritative event stream. Holdings is secondary validation, not the historical ledger.
-
-#### 3. Retry policy
-
-Configurable via environment variables. Simple linear retries — **no exponential backoff, no rate-limit detection** (per approved plan).
-
-| Variable | Default | Used for |
-|----------|---------|----------|
-| `DHAN_AUTH_MAX_RETRIES` | 10 | Token generation |
-| `DHAN_MAX_RETRIES` | 10 | Profile, holdings, trade history |
-
-If authentication fails after all retries, the entire run fails (we never call APIs with a bad token).
-
-#### 4. Trade history pagination
-
-Endpoint: `GET /v2/trades/{from-date}/{to-date}/{page-number}`  
-Start at page `0`. Loop until an **empty array** is returned.
-
-Default date range: last 30 days. Override with `DHAN_TRADE_FROM` / `DHAN_TRADE_TO`.
-
-#### 5. Phase 1 output files
-
-Raw API responses are saved under `output/` for inspection (gitignored — may contain account data):
-
-| File | Contents |
-|------|----------|
-| `auth_response.json` | Token metadata + expiry; reused in dev when `DHAN_REUSE_ACCESS_TOKEN=true` |
-| `profile.json` | Account profile |
-| `holdings.json` | Current demat holdings |
-| `trade_history.json` | All trades in the requested date range |
+Run: `python scripts/phase1_validate.py` — saves raw API dumps under `output/`.
 
 ---
 
-## Live validation results (Phase 1)
+## Phase 2 — PostgreSQL & data ingestion
 
-Tested successfully against a real Dhan account on **11-Aug-2026**:
+Phase 2 persists Dhan data in **Neon PostgreSQL** so we have a permanent, queryable ledger before building the FIFO engine.
 
-| Step | Result |
-|------|--------|
-| TOTP auth | Success — token expiry ~24 hours |
-| Profile | Success |
-| Holdings | 25 securities |
-| Trade history (30 days) | 19 trades, 1 page |
+### What was built
 
-### Important observations (for Phase 2/3)
+| Component | Purpose |
+|-----------|---------|
+| Neon connection | `DATABASE_URL` + `scripts/test_db_connection.py` |
+| Schema migrations | `sync_runs`, `dhan_trades`, `holdings_current` |
+| Trade ingest | Idempotent insert with composite dedup key |
+| Holdings sync | Upsert current portfolio snapshot |
+| Backfill | Fetch all trades from 2025-09-20 → today in monthly chunks |
 
-These are documented in detail in [`docs/DHAN_API_QUESTIONS.md`](docs/DHAN_API_QUESTIONS.md) for the Dhan API team.
+### Postgres tables
 
-1. **`exchangeTradeId` is always `"0"`** in live Trade History — cannot be used alone as a unique trade key. Phase 3 will use a **composite key** (e.g. `orderId` + `exchangeTime` + `tradedQuantity` + `tradedPrice` + `transactionType`).
+| Table | Source | Purpose |
+|-------|--------|---------|
+| `dhan_trades` | Trade History API | Permanent raw ledger (every BUY/SELL) |
+| `holdings_current` | Holdings API | Latest snapshot for reconciliation |
+| `sync_runs` | Internal | Log each backfill/sync run |
 
-2. **`exchangeTime` format** in live data is ISO (`2026-08-10T10:17:36`), not the space-separated format shown in some doc examples. Code will parse what the API actually returns.
+All tables include Rails-style `created_at` / `updated_at` (auto-updated via PostgreSQL triggers).
 
-3. **`orderId` is not safe as sole unique key** — Dhan docs state one order can produce multiple trade rows on partial fills. Composite key handles this.
+### Dedup key
 
-4. **Token lifecycle** — each run gets a fresh token; we do not persist tokens between runs.
+`exchangeTradeId` is always `"0"` in live data, so trades are deduplicated on:
+
+`(order_id, exchange_time, transaction_type, traded_quantity, traded_price, security_id)`
+
+Re-running backfill is safe — duplicates are skipped via `ON CONFLICT DO NOTHING`.
+
+### Fetch strategy
+
+- **Date range:** monthly chunks (defensive — Dhan docs don't specify max range per request)
+- **Pagination:** page `0` until empty array within each chunk
+- **Rate safety:** `DHAN_TRADE_HISTORY_SLEEP_SECONDS` pause between Trade History requests (pages and chunks)
+
+### Backfill results (11-Aug-2026)
+
+| Metric | Value |
+|--------|-------|
+| Date range | 2025-09-20 → 2026-08-11 |
+| Trades ingested | 192 |
+| Holdings upserted | 25 |
+| Monthly chunks | 12 |
 
 ---
 
@@ -134,20 +101,29 @@ These are documented in detail in [`docs/DHAN_API_QUESTIONS.md`](docs/DHAN_API_Q
 
 ```
 Holdings-Tracker/
-├── README.md                          # This file
+├── README.md
 ├── docs/
-│   └── DHAN_API_QUESTIONS.md          # Questions for Dhan API team
-├── requirements.txt                   # Python dependencies
-├── sample.env                         # Environment variable template
-├── dhan-api-docs.md                   # Local DhanHQ API v2 export
+│   └── DHAN_API_QUESTIONS.md
+├── migrations/
+│   └── 001_initial_schema.sql
+├── requirements.txt
+├── sample.env
+├── run_holdings_tracker.sh          # Full dev pipeline
+├── dhan-api-docs.md
 ├── scripts/
-│   └── phase1_validate.py             # Phase 1 validation script
+│   ├── phase1_validate.py           # Phase 1 — API validation
+│   ├── test_db_connection.py        # Verify Neon connectivity
+│   ├── run_migrations.py            # Apply SQL migrations
+│   └── backfill_trades.py           # Phase 2 — fetch + ingest
 ├── src/
-│   ├── auth.py                        # TOTP → access token
-│   ├── config.py                      # Environment loading
-│   ├── dhan_client.py                 # Profile, holdings, trade history
-│   └── retry.py                       # Configurable retry helper
-└── output/                            # Phase 1 API dumps (gitignored)
+│   ├── auth.py                      # TOTP auth + token reuse
+│   ├── config.py                    # Environment loading
+│   ├── db.py                        # Postgres connection + migrations
+│   ├── dhan_client.py               # Profile, holdings, trade history
+│   ├── trade_ingest.py              # Parse + insert dhan_trades
+│   ├── holdings_sync.py             # Upsert holdings_current
+│   └── retry.py                     # Configurable retry helper
+└── output/                          # API dumps + auth token (gitignored)
 ```
 
 ---
@@ -157,6 +133,7 @@ Holdings-Tracker/
 - Python 3.11+ (3.10+ should work)
 - A Dhan account with **TOTP enabled** for API access
 - Credentials: Client ID, PIN, TOTP secret
+- Neon PostgreSQL database (free tier works)
 
 Setup TOTP on Dhan: web.dhan.co → My Profile → Access DhanHQ APIs → Setup TOTP.
 
@@ -176,8 +153,6 @@ pip install -r requirements.txt
 
 ### 2. Configure environment
 
-Copy the template and fill in your credentials:
-
 ```bash
 cp sample.env .env
 ```
@@ -188,13 +163,16 @@ Edit `.env`:
 DHAN_CLIENT_ID=your_client_id
 DHAN_PIN=your_pin
 DHAN_TOTP_SECRET=your_totp_secret
+DATABASE_URL=postgresql://...    # Neon pooled connection string
 
 # Optional
-DHAN_MAX_RETRIES=10
-DHAN_AUTH_MAX_RETRIES=10
+DHAN_MAX_RETRIES=5
+DHAN_AUTH_MAX_RETRIES=5
+DHAN_TRADE_HISTORY_SLEEP_SECONDS=1
+DHAN_REUSE_ACCESS_TOKEN=true     # dev only; false in production
 
-# Optional — override trade history date range (YYYY-MM-DD)
-# DHAN_TRADE_FROM=2025-01-01
+# Optional — backfill date range (YYYY-MM-DD)
+# DHAN_TRADE_FROM=2025-09-20
 # DHAN_TRADE_TO=2026-08-11
 ```
 
@@ -202,92 +180,104 @@ DHAN_AUTH_MAX_RETRIES=10
 
 ---
 
-## How to run (Phase 1)
+## How to run
 
-From the project root with the virtual environment activated:
+### Full pipeline (development)
 
 ```bash
+./run_holdings_tracker.sh
+```
+
+Or step by step:
+
+```bash
+# 1. Verify Dhan API (optional — saves JSON to output/)
 python scripts/phase1_validate.py
+
+# 2. Verify Neon connection
+python scripts/test_db_connection.py
+
+# 3. Apply schema migrations (safe to re-run)
+python scripts/run_migrations.py
+
+# 4. Backfill trades + sync holdings
+python scripts/backfill_trades.py
 ```
 
-Expected flow:
+### Verify data in Neon
 
-```
-============================================================
-Phase 1 — Dhan API & Authentication
-As of: 11-Aug-2026 13:05:10
-============================================================
-
-[1/4] Authenticating with TOTP...
-[2/4] Fetching profile...
-[3/4] Fetching holdings...
-[4/4] Fetching trade history (paginated)...
-
-============================================================
-Phase 1 validation complete.
-Raw responses saved under: output/
-============================================================
-```
-
-Inspect results:
-
-```bash
-ls output/
-# auth_response.json  holdings.json  profile.json  trade_history.json
+```sql
+SELECT COUNT(*) FROM dhan_trades;
+SELECT COUNT(*) FROM holdings_current;
+SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1;
 ```
 
 ---
 
 ## Module reference
 
-### `src/config.py`
-
-Loads and validates environment variables. Fails fast if required vars are missing.
-
 ### `src/auth.py`
 
-- `generate_totp(secret)` — current 6-digit code via `pyotp`
-- `generate_access_token(settings)` — POST to `auth.dhan.co/app/generateAccessToken` with retries
-
-Uses query parameters per Dhan docs: `dhanClientId`, `pin`, `totp`.
+- `get_access_token(settings)` — reuse cached token if valid, else generate new via TOTP
+- `generate_access_token(settings)` — force new token from Dhan auth endpoint
+- Cache file: `output/auth_response.json` (when `DHAN_REUSE_ACCESS_TOKEN=true`)
 
 ### `src/dhan_client.py`
 
 - `DhanClient(access_token, settings)` — session with `access-token` header
 - `get_profile()` → `GET /v2/profile`
 - `get_holdings()` → `GET /v2/holdings`
-- `get_trade_history(from_date, to_date)` → paginated `GET /v2/trades/…`
+- `get_trade_history(from_date, to_date)` → paginated `GET /v2/trades/…` with sleep between pages
 
-### `src/retry.py`
+### `src/db.py`
 
-Generic retry wrapper: attempt 1…N, log failures, hard fail on exhaustion. No backoff.
+- `get_connection()` / `check_connection()` — Postgres connectivity
+- `run_migrations()` — apply pending SQL from `migrations/`
 
-### `scripts/phase1_validate.py`
+### `src/trade_ingest.py`
 
-Orchestrates the four validation steps and writes JSON output.
+- `ingest_trades(conn, trades, sync_run_id)` — parse Dhan JSON → insert into `dhan_trades`
+
+### `src/holdings_sync.py`
+
+- `sync_holdings(conn, holdings)` — upsert into `holdings_current`
+
+### `scripts/backfill_trades.py`
+
+Orchestrates: auth → sync_run → monthly trade fetch → ingest → holdings sync → finalize.
+
+---
+
+## Important API observations
+
+Documented in [`docs/DHAN_API_QUESTIONS.md`](docs/DHAN_API_QUESTIONS.md):
+
+1. **`exchangeTradeId` is always `"0"`** — composite dedup key implemented in Phase 2
+2. **`exchangeTime` format** — ISO (`2026-08-10T10:17:36`) in live data; parser handles both ISO and space-separated
+3. **`orderId` can map to multiple fills** — composite key handles partial fills safely
+4. **Token lifecycle** — fresh token each production run; dev reuse via `auth_response.json`
 
 ---
 
 ## Security notes
 
 - `.env` and `output/` are gitignored
-- `output/auth_response.json` contains a live JWT — treat as secret; do not share or commit
-- Store production credentials in **GitHub Secrets** (Phase 3), not in the repo
+- `output/auth_response.json` contains a live JWT — treat as secret
+- Store production credentials in **GitHub Secrets** (Phase 4), not in the repo
+- Set `DHAN_REUSE_ACCESS_TOKEN=false` in production
 - Rotate PIN/TOTP secret if credentials were ever exposed
 
 ---
 
-## What's next — Phase 2
+## What's next — Phase 3
 
-Phase 2 builds the FIFO lot engine:
+Phase 3 builds the FIFO lot engine:
 
-- Normalize trades from Dhan (or CSV for validation)
+- Normalize trades from `dhan_trades` (filter CNC / NSE_EQ)
 - BUY → create lot; SELL → consume lots (FIFO)
 - Calculate long-term conversion date per lot (>12 months from purchase)
-- Reconcile open quantities against Dhan Holdings
+- Reconcile open quantities against `holdings_current`
 - Validate against your transaction CSV
-
-Start a new chat titled **Phase 2 — FIFO & Lot Engine** when ready.
 
 ---
 
