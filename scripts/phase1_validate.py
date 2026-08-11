@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.auth import generate_access_token
+from src.auth import AUTH_RESPONSE_PATH, get_access_token
 from src.config import Settings
 from src.dhan_client import DhanClient, default_trade_date_range
 
@@ -34,9 +34,13 @@ def main() -> int:
     settings = Settings.from_env()
 
     print("\n[1/4] Authenticating with TOTP...")
-    auth_payload = generate_access_token(settings)
-    token_path = save_json("auth_response.json", auth_payload)
-    print(f"  accessToken: {'*' * 8}... (saved metadata to {token_path.name})")
+    auth_payload, reused = get_access_token(settings)
+    if not settings.reuse_access_token:
+        save_json("auth_response.json", auth_payload)
+    print(
+        f"  {'Reusing cached' if reused else 'Generated new'} access token "
+        f"(metadata in {AUTH_RESPONSE_PATH.name})"
+    )
     print(f"  expiryTime:  {auth_payload.get('expiryTime')}")
     print(f"  clientName:  {auth_payload.get('dhanClientName')}")
 
