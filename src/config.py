@@ -13,14 +13,14 @@ def _required(name: str) -> str:
     return value
 
 
-def _int_env(name: str, default: int) -> int:
+def _int_env(name: str, default: int, *, minimum: int = 1) -> int:
     raw = os.getenv(name, str(default)).strip()
     try:
         value = int(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer, got: {raw!r}") from exc
-    if value < 1:
-        raise ValueError(f"{name} must be at least 1, got: {value}")
+    if value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}, got: {value}")
     return value
 
 
@@ -34,6 +34,8 @@ class Settings:
     trade_from: str | None
     trade_to: str | None
     database_url: str | None
+    trade_history_sleep_seconds: int
+    reuse_access_token: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -41,9 +43,14 @@ class Settings:
             client_id=_required("DHAN_CLIENT_ID"),
             pin=_required("DHAN_PIN"),
             totp_secret=_required("DHAN_TOTP_SECRET"),
-            max_retries=_int_env("DHAN_MAX_RETRIES", 10),
-            auth_max_retries=_int_env("DHAN_AUTH_MAX_RETRIES", 10),
+            max_retries=_int_env("DHAN_MAX_RETRIES", 5),
+            auth_max_retries=_int_env("DHAN_AUTH_MAX_RETRIES", 5),
             trade_from=os.getenv("DHAN_TRADE_FROM", "").strip() or None,
             trade_to=os.getenv("DHAN_TRADE_TO", "").strip() or None,
             database_url=os.getenv("DATABASE_URL", "").strip() or None,
+            trade_history_sleep_seconds=_int_env(
+                "DHAN_TRADE_HISTORY_SLEEP_SECONDS", 1, minimum=0
+            ),
+            reuse_access_token=os.getenv("DHAN_REUSE_ACCESS_TOKEN", "false").strip().lower()
+            in {"1", "true", "yes", "on"},
         )

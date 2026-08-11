@@ -1,3 +1,4 @@
+import time
 from datetime import date, timedelta
 
 import requests
@@ -62,6 +63,9 @@ class DhanClient:
 
             all_trades.extend(payload)
             page += 1
+
+            if self._settings.trade_history_sleep_seconds > 0:
+                time.sleep(self._settings.trade_history_sleep_seconds)
 
         return all_trades, page
 
