@@ -33,6 +33,7 @@ class Settings:
     auth_max_retries: int
     trade_from: str | None
     trade_to: str | None
+    database_url: str | None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -44,4 +45,5 @@ class Settings:
             auth_max_retries=_int_env("DHAN_AUTH_MAX_RETRIES", 10),
             trade_from=os.getenv("DHAN_TRADE_FROM", "").strip() or None,
             trade_to=os.getenv("DHAN_TRADE_TO", "").strip() or None,
+            database_url=os.getenv("DATABASE_URL", "").strip() or None,
         )
