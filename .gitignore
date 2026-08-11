@@ -147,6 +147,9 @@ activemq-data/
 # SageMath parsed files
 *.sage.py
 
+# Phase 1 API validation outputs (may contain account data)
+output/
+
 # Environments
 .env
 .envrc
