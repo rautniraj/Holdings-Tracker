@@ -59,7 +59,7 @@ used for this run only, then discarded
 
 You do **not** open an authenticator app manually. The secret is stored once; the code is generated programmatically.
 
-**Token reuse:** We do **not** cache or reuse tokens. Every run generates a fresh token. This is intentional — simple, stateless, and safe for daily automation.
+**Token reuse:** With `DHAN_REUSE_ACCESS_TOKEN=true` (development), a valid token in `output/auth_response.json` is reused across runs. Set to `false` in production — each run generates a fresh token with no disk cache.
 
 #### 2. Read-only APIs only
 
@@ -98,7 +98,7 @@ Raw API responses are saved under `output/` for inspection (gitignored — may c
 
 | File | Contents |
 |------|----------|
-| `auth_response.json` | Token metadata + expiry (debug only; not reused) |
+| `auth_response.json` | Token metadata + expiry; reused in dev when `DHAN_REUSE_ACCESS_TOKEN=true` |
 | `profile.json` | Account profile |
 | `holdings.json` | Current demat holdings |
 | `trade_history.json` | All trades in the requested date range |
