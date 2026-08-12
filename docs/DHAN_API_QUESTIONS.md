@@ -35,9 +35,20 @@ In a live `GET /v2/trades/{from-date}/{to-date}/0` response (19 trades, NSE_EQ C
 1. Is `"0"` expected for certain segments, product types, or order types?
 2. Under what conditions is a real exchange trade ID populated?
 3. For idempotent trade ingestion, what field(s) do you recommend as a **stable unique key** per trade row when `exchangeTradeId` is `"0"`?
-4. Is a composite key acceptable on our side (e.g. `orderId` + `exchangeTime` + `tradedQuantity` + `tradedPrice` + `transactionType`)?
+4. Is a composite key acceptable on our side (e.g. `orderId` + `exchangeTime` + `tradedQuantity` + `tradedPrice` + `transactionType` + `isin`)?
+
+**Our implementation:** composite key includes `isin` — required after observing IPO rows with `orderId`/`securityId` = `"0"`. See [`OBSERVATIONS.md`](OBSERVATIONS.md).
 
 ---
+
+## 1b. Trade History — IPO allotment rows
+
+See [`OBSERVATIONS.md`](OBSERVATIONS.md) for full detail. IPO credits appear as BUY with `orderId: "0"`, `securityId: "0"`, `tradedPrice: 0`.
+
+### Questions
+
+1. Is this the expected representation for IPO allotment credits in Trade History?
+2. Where can the actual IPO allotment price be retrieved?
 
 ## 2. Trade History — `orderId` vs multiple fills (partial execution)
 
@@ -172,15 +183,32 @@ We do **not** store or reuse tokens between runs.
 
 Holdings response includes: `tradingSymbol`, `securityId`, `isin`, `totalQty`, `dpQty`, `t1Qty`, `availableQty`, `avgCostPrice`, etc.
 
-Some rows show `dpQty: 0` with `t1Qty > 0` (T+1 settlement).
+Some rows show `dpQty: 0` with `t1Qty > 0` (T+1 settlement after BUY).
 
-### Questions
+**T+1 after SELL (11-Aug-2026):** MVELECTRO (`INE0OWZ01020`) — SELL placed ~2:30 PM on 11 Aug. Holdings snapshot same night still showed `totalQty: 32` but `dpQty: 0`, `t1Qty: 0`, `availableQty: 0`. Trade History showed the SELL by 12 Aug noon. Holdings may lag until settlement completes. Full detail: [`OBSERVATIONS.md`](OBSERVATIONS.md) §2.
 
-1. For reconciliation of **delivered** holdings, should we compare against `totalQty`, `dpQty`, or `availableQty`?
-2. How should T+1 quantities (`t1Qty`) be treated when computing open lots for tax holding-period tracking?
-3. Does FIFO cost basis from Trade History align with `avgCostPrice` in Holdings, or can they diverge (as Dhan support articles suggest for P&L)?
+### Field definitions (from Dhan docs)
 
----
+| Field | Documented meaning |
+|-------|-------------------|
+| `totalQty` | T1 qty + delivered qty |
+| `dpQty` | Delivered quantity (in demat) |
+| `t1Qty` | T+1 quantity |
+| `availableQty` | Total quantity minus pledged quantity |
+
+### Our working hypothesis (until Dhan confirms)
+
+For Phase 3 reconciliation (FIFO open qty vs Holdings), compare against **`availableQty`** — not `totalQty`. Rationale: after a SELL, `totalQty` can still show the stock while `availableQty` may already reflect zero tradable qty.
+
+Alternative considered: `dpQty` (settled/delivered only) — also reasonable; awaiting Dhan guidance.
+
+### Questions for Dhan
+
+1. For reconciliation of open demat holdings vs trade-book FIFO, which field is authoritative: **`totalQty`**, **`dpQty`**, or **`availableQty`**?
+2. After a CNC SELL on day T, when does each qty field update (same day, T+1, T+2)?
+3. How should **`t1Qty`** be treated when computing open lots for tax holding-period tracking?
+4. Can `totalQty > 0` while `dpQty`, `t1Qty`, and `availableQty` are all zero (as observed for MVELECTRO post-SELL)? What does that state mean?
+5. Does FIFO cost basis from Trade History align with `avgCostPrice` in Holdings, or can they diverge?
 
 ## 8. General — read-only automation
 
@@ -201,6 +229,7 @@ Some rows show `dpQty: 0` with `t1Qty > 0` (T+1 settlement).
 | `orderId` uniqueness | One order → many trades possible | 1:1 in our sample | Use composite key for safety |
 | Access token | ~24h validity | Confirmed | Fresh token each run |
 | Pagination | Paginated, page 0 | Stop on empty array | Need page size confirmation |
+| Reconciliation qty | Unclear | `totalQty` stale after SELL; `availableQty` may be 0 | Use `availableQty` pending Dhan answer — see OBSERVATIONS §2 |
 
 ---
 
