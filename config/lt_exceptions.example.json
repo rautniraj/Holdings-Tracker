@@ -1,0 +1,21 @@
+{
+  "_readme": "Copy entries from this file into config/lt_exceptions.json when you have real overrides.",
+  "default_lt_months": 12,
+  "exceptions": [
+    {
+      "isin": "INEXXXXXXXX",
+      "lt_months": 24,
+      "note": "Example: long-term only after 2 calendar years"
+    },
+    {
+      "isin": "INEYYYYYYYY",
+      "lt_months": 36,
+      "note": "Example: long-term only after 3 calendar years"
+    },
+    {
+      "isin": "INEZZZZZZZZ",
+      "never_lt": true,
+      "note": "Example: never classified as long-term, any holding period"
+    }
+  ]
+}

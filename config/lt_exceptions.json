@@ -1,0 +1,5 @@
+{
+  "_readme": "Per-ISIN long-term holding period overrides. ISINs not listed below use default_lt_months (12 calendar months + 1 day). Set never_lt=true for stocks that are never classified as long-term. Set lt_months for non-standard periods (e.g. 24 = 2 years, 36 = 3 years).",
+  "default_lt_months": 12,
+  "exceptions": []
+}
