@@ -16,6 +16,7 @@ Dhan shows ST/LT classification only after conversion. This project reconstructs
 | Phase 4 | GitHub Actions daily cron | Not started |
 | Phase 5 | NTFY notifications + ops hardening | Not started |
 
+Planning docs: [`docs/PHASE_1_PLAN.md`](docs/PHASE_1_PLAN.md) · [`docs/PHASE_2_PLAN.md`](docs/PHASE_2_PLAN.md) · [`docs/PHASE_3_PLAN.md`](docs/PHASE_3_PLAN.md)  
 Planning reference: `Dhan-Project---Serious-Problem-Troubleshooting-2026-08-11.html`  
 API reference (local export): `dhan-api-docs.md`
 
@@ -67,18 +68,24 @@ Phase 2 persists Dhan data in **Neon PostgreSQL** so we have a permanent, querya
 | Table | Source | Purpose |
 |-------|--------|---------|
 | `dhan_trades` | Trade History API | Permanent raw ledger (every BUY/SELL) |
-| `holdings_current` | Holdings API | Latest snapshot for reconciliation |
+| `holdings_current` | Holdings API | Latest snapshot for reconciliation (`dp_qty`, `t1_qty`, `available_qty` stored) |
 | `sync_runs` | Internal | Log each backfill/sync run |
 
 All tables include Rails-style `created_at` / `updated_at` (auto-updated via PostgreSQL triggers).
 
 ### Dedup key
 
-`exchangeTradeId` is always `"0"` in live data, so trades are deduplicated on:
+`exchangeTradeId` is always `"0"` in live data. Trades are deduplicated on:
 
-`(order_id, exchange_time, transaction_type, traded_quantity, traded_price, security_id)`
+`(order_id, exchange_time, transaction_type, traded_quantity, traded_price, security_id, isin)`
+
+`isin` is required — IPO allotment rows have `order_id` and `security_id` as `"0"`; without `isin`, different IPO credits could collide. See [`docs/OBSERVATIONS.md`](docs/OBSERVATIONS.md).
 
 Re-running backfill is safe — duplicates are skipped via `ON CONFLICT DO NOTHING`.
+
+### Reconciliation qty field (Phase 3)
+
+FIFO open qty will be compared against **`holdings_current.available_qty`** by ISIN (working hypothesis). **Not `total_qty`** — it can stay non-zero after a SELL while T+1 settlement completes. Pending confirmation from Dhan — see [`docs/OBSERVATIONS.md`](docs/OBSERVATIONS.md) §2 and [`docs/DHAN_API_QUESTIONS.md`](docs/DHAN_API_QUESTIONS.md) §7.
 
 ### Fetch strategy
 
@@ -103,9 +110,14 @@ Re-running backfill is safe — duplicates are skipped via `ON CONFLICT DO NOTHI
 Holdings-Tracker/
 ├── README.md
 ├── docs/
-│   └── DHAN_API_QUESTIONS.md
+│   ├── DHAN_API_QUESTIONS.md
+│   ├── OBSERVATIONS.md              # Live data edge cases (IPO, etc.)
+│   ├── PHASE_1_PLAN.md              # Dhan API validation (complete)
+│   ├── PHASE_2_PLAN.md              # PostgreSQL + ingestion (complete)
+│   └── PHASE_3_PLAN.md              # FIFO lot engine plan
 ├── migrations/
-│   └── 001_initial_schema.sql
+│   ├── 001_initial_schema.sql
+│   └── 002_add_isin_to_dedup_key.sql
 ├── requirements.txt
 ├── sample.env
 ├── run_holdings_tracker.sh          # Full dev pipeline
@@ -250,12 +262,14 @@ Orchestrates: auth → sync_run → monthly trade fetch → ingest → holdings 
 
 ## Important API observations
 
-Documented in [`docs/DHAN_API_QUESTIONS.md`](docs/DHAN_API_QUESTIONS.md):
+Documented in [`docs/OBSERVATIONS.md`](docs/OBSERVATIONS.md) and [`docs/DHAN_API_QUESTIONS.md`](docs/DHAN_API_QUESTIONS.md):
 
-1. **`exchangeTradeId` is always `"0"`** — composite dedup key implemented in Phase 2
-2. **`exchangeTime` format** — ISO (`2026-08-10T10:17:36`) in live data; parser handles both ISO and space-separated
-3. **`orderId` can map to multiple fills** — composite key handles partial fills safely
-4. **Token lifecycle** — fresh token each production run; dev reuse via `auth_response.json`
+1. **`exchangeTradeId` is always `"0"`** — composite dedup key includes `isin`
+2. **IPO allotment** — `orderId`/`securityId`/`price` = 0; ISIN + qty reliable
+3. **T+1 settlement lag** — after SELL, trade history updates before holdings; reconcile using `available_qty` (pending Dhan confirm), not `total_qty`
+4. **`exchangeTime` format** — ISO in live data; parser handles both formats
+5. **`orderId` can map to multiple fills** — composite key handles partial fills
+6. **Token lifecycle** — fresh token each production run; dev reuse via `auth_response.json`
 
 ---
 
@@ -271,12 +285,14 @@ Documented in [`docs/DHAN_API_QUESTIONS.md`](docs/DHAN_API_QUESTIONS.md):
 
 ## What's next — Phase 3
 
-Phase 3 builds the FIFO lot engine:
+Phase 3 builds the FIFO lot engine. Full plan: [`docs/PHASE_3_PLAN.md`](docs/PHASE_3_PLAN.md)
 
 - Normalize trades from `dhan_trades` (filter CNC / NSE_EQ)
 - BUY → create lot; SELL → consume lots (FIFO)
+- Handle IPO rows (`orderId`/`price` = 0) — see [`docs/OBSERVATIONS.md`](docs/OBSERVATIONS.md) §1
+- Handle T+1 settlement lag — reconcile vs `available_qty`, not `total_qty` — see §2
 - Calculate long-term conversion date per lot (>12 months from purchase)
-- Reconcile open quantities against `holdings_current`
+- Reconcile open quantities against `holdings_current.available_qty` by ISIN (pending Dhan confirm)
 - Validate against your transaction CSV
 
 ---
@@ -286,4 +302,5 @@ Phase 3 builds the FIFO lot engine:
 - [DhanHQ API v2](https://docs.dhanhq.co/api/v2/)
 - [DhanHQ docs (alternate)](https://dhanhq.co/docs/v2/)
 - Local export: `dhan-api-docs.md`
-- Open questions for Dhan: `docs/DHAN_API_QUESTIONS.md`
+- Open questions for Dhan: [`docs/DHAN_API_QUESTIONS.md`](docs/DHAN_API_QUESTIONS.md)
+- Live data observations: [`docs/OBSERVATIONS.md`](docs/OBSERVATIONS.md)
