@@ -18,7 +18,7 @@ Dhan shows ST/LT classification only after conversion. This project reconstructs
 | Phase 6 | NTFY notifications + ops hardening | Not started |
 
 Planning docs: [`docs/PHASE_1_PLAN.md`](docs/PHASE_1_PLAN.md) · [`docs/PHASE_2_PLAN.md`](docs/PHASE_2_PLAN.md) · [`docs/PHASE_3_PLAN.md`](docs/PHASE_3_PLAN.md) · [`docs/PHASE_4_PLAN.md`](docs/PHASE_4_PLAN.md)  
-Planning reference: `Dhan-Project--chatgpt-chat-2026-08-11.html`
+Planning reference: `Dhan-Project--chatgpt-chat-2026-08-11.html`  
 API reference (local export): `dhan-api-docs.md`
 
 ---
