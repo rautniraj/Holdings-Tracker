@@ -53,10 +53,16 @@ ON CONFLICT (security_id) DO UPDATE SET
   raw_payload = EXCLUDED.raw_payload
 """
 
+DELETE_HOLDINGS_NOT_IN_SQL = """
+DELETE FROM holdings_current
+WHERE NOT (security_id = ANY(%s))
+"""
+
 
 @dataclass(frozen=True)
 class HoldingsSyncResult:
     upserted: int
+    deleted: int
 
 
 def _holding_row(holding: dict) -> dict:
@@ -82,9 +88,30 @@ def _holding_row(holding: dict) -> dict:
     }
 
 
-def sync_holdings(conn: PgConnection, holdings: list[dict]) -> HoldingsSyncResult:
+def sync_holdings_snapshot(
+    conn: PgConnection, holdings: list[dict]
+) -> HoldingsSyncResult:
+    """Upsert API holdings and remove DB rows absent from the latest snapshot."""
+    api_security_ids: list[str] = []
+    for holding in holdings:
+        security_id = holding.get("securityId")
+        if not security_id:
+            raise ValueError(f"Holding missing securityId: {holding}")
+        api_security_ids.append(str(security_id))
+
     with conn.cursor() as cur:
         for holding in holdings:
             cur.execute(UPSERT_HOLDING_SQL, _holding_row(holding))
 
-    return HoldingsSyncResult(upserted=len(holdings))
+        if api_security_ids:
+            cur.execute(DELETE_HOLDINGS_NOT_IN_SQL, (api_security_ids,))
+        else:
+            cur.execute("DELETE FROM holdings_current")
+        deleted = cur.rowcount
+
+    return HoldingsSyncResult(upserted=len(holdings), deleted=deleted)
+
+
+def sync_holdings(conn: PgConnection, holdings: list[dict]) -> HoldingsSyncResult:
+    """Alias for snapshot sync (Phase 4)."""
+    return sync_holdings_snapshot(conn, holdings)
