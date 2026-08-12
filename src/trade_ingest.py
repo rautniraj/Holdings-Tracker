@@ -66,7 +66,7 @@ INSERT INTO dhan_trades (
   %(raw_payload)s,
   %(sync_run_id)s
 )
-ON CONFLICT (order_id, exchange_time, transaction_type, traded_quantity, traded_price, security_id)
+ON CONFLICT (order_id, exchange_time, transaction_type, traded_quantity, traded_price, security_id, isin)
 DO NOTHING
 """
 
@@ -95,12 +95,15 @@ def _trade_row(trade: dict, sync_run_id: int | None) -> dict:
     transaction_type = trade.get("transactionType")
     traded_quantity = trade.get("tradedQuantity")
     traded_price = trade.get("tradedPrice")
+    isin = trade.get("isin")
     exchange_time_raw = trade.get("exchangeTime")
 
-    if not order_id:
+    if order_id is None or str(order_id).strip() == "":
         raise ValueError(f"Trade missing orderId: {trade}")
-    if not security_id:
+    if security_id is None or str(security_id).strip() == "":
         raise ValueError(f"Trade missing securityId: {trade}")
+    if not isin or str(isin).strip() == "":
+        raise ValueError(f"Trade missing isin: {trade}")
     if not transaction_type:
         raise ValueError(f"Trade missing transactionType: {trade}")
     if traded_quantity is None:
@@ -124,7 +127,7 @@ def _trade_row(trade: dict, sync_run_id: int | None) -> dict:
         "product_type": trade.get("productType"),
         "order_type": trade.get("orderType"),
         "custom_symbol": trade.get("customSymbol"),
-        "isin": trade.get("isin"),
+        "isin": str(isin).strip(),
         "instrument": trade.get("instrument"),
         "sebi_tax": trade.get("sebiTax"),
         "stt": trade.get("stt"),
