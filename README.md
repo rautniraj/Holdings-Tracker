@@ -12,7 +12,7 @@ Dhan shows ST/LT classification only after conversion. This project reconstructs
 |-------|--------|--------|
 | **Phase 1** | Dhan API & authentication validation | **Complete** |
 | **Phase 2** | Neon PostgreSQL + trade/holdings ingestion | **Complete** |
-| Phase 3 | FIFO lot engine + CSV validation | Not started |
+| **Phase 3** | FIFO lot engine + reconciliation | **Complete** |
 | Phase 4 | GitHub Actions daily cron | Not started |
 | Phase 5 | NTFY notifications + ops hardening | Not started |
 
@@ -104,6 +104,42 @@ FIFO open qty will be compared against **`holdings_current.available_qty`** by I
 
 ---
 
+## Phase 3 — FIFO lot engine & reconciliation
+
+Phase 3 reconstructs **open lots** from trade history (FIFO), calculates **long-term conversion date** per lot, and reconciles against holdings.
+
+### What was built
+
+| Component | Purpose |
+|-----------|---------|
+| `lots` + `lot_allocations` | FIFO output tables |
+| `src/fifo_engine.py` | BUY → lot, SELL → consume oldest (by ISIN) |
+| `src/reconciliation.py` | FIFO open qty vs `holdings_current.available_qty` |
+| `src/lt_rules.py` | Indian LT calendar rule + `config/lt_exceptions.json` |
+| `src/ingest_warnings.py` | Stale duplicate detection after backfill |
+| `src/ntfy.py` | Push alerts on warnings / reconciliation failure |
+| `scripts/run_fifo.py` | Rebuild lots + reconcile |
+| `daily_trade_rollup` view | Per ISIN/day BUY/SELL totals (reporting only) |
+
+### Key rules
+
+- **FIFO filter:** CNC, `NSE_EQ` + `BSE_EQ`, BUY/SELL only
+- **LT date:** day after 12 calendar months from purchase (not 365 days)
+- **Reconciliation:** by ISIN vs `available_qty` (not `total_qty`)
+- **Reports:** `output/reconciliation_latest.json`, `output/ingest_warnings_latest.json`
+
+### Live results (12-Aug-2026)
+
+| Metric | Value |
+|--------|-------|
+| Trades processed | 194 |
+| Lots open / closed | 118 / 49 |
+| Reconciliation | 25/25 matched |
+
+Run: `./run_holdings_tracker.sh` (backfill + FIFO)
+
+---
+
 ## Project structure
 
 ```
@@ -114,10 +150,14 @@ Holdings-Tracker/
 │   ├── OBSERVATIONS.md              # Live data edge cases (IPO, etc.)
 │   ├── PHASE_1_PLAN.md              # Dhan API validation (complete)
 │   ├── PHASE_2_PLAN.md              # PostgreSQL + ingestion (complete)
-│   └── PHASE_3_PLAN.md              # FIFO lot engine plan
+│   └── PHASE_3_PLAN.md              # FIFO lot engine (complete)
+├── config/
+│   └── lt_exceptions.json           # Per-ISIN LT month overrides
 ├── migrations/
 │   ├── 001_initial_schema.sql
-│   └── 002_add_isin_to_dedup_key.sql
+│   ├── 002_add_isin_to_dedup_key.sql
+│   ├── 003_lots_schema.sql
+│   └── 004_daily_trade_rollup_view.sql
 ├── requirements.txt
 ├── sample.env
 ├── run_holdings_tracker.sh          # Full dev pipeline
@@ -126,16 +166,22 @@ Holdings-Tracker/
 │   ├── phase1_validate.py           # Phase 1 — API validation
 │   ├── test_db_connection.py        # Verify Neon connectivity
 │   ├── run_migrations.py            # Apply SQL migrations
-│   └── backfill_trades.py           # Phase 2 — fetch + ingest
+│   ├── backfill_trades.py           # Fetch + ingest trades + holdings
+│   └── run_fifo.py                  # Phase 3 — FIFO + reconciliation
 ├── src/
 │   ├── auth.py                      # TOTP auth + token reuse
 │   ├── config.py                    # Environment loading
 │   ├── db.py                        # Postgres connection + migrations
 │   ├── dhan_client.py               # Profile, holdings, trade history
-│   ├── trade_ingest.py              # Parse + insert dhan_trades
+│   ├── trade_ingest.py              # Upsert dhan_trades (7-key dedup)
 │   ├── holdings_sync.py             # Upsert holdings_current
+│   ├── fifo_engine.py               # FIFO lot builder
+│   ├── reconciliation.py            # Holdings reconciliation
+│   ├── lt_rules.py                  # LT conversion dates
+│   ├── ingest_warnings.py           # Stale duplicate detection
+│   ├── ntfy.py                      # Push notifications
 │   └── retry.py                     # Configurable retry helper
-└── output/                          # API dumps + auth token (gitignored)
+└── output/                          # Reports + API dumps (gitignored)
 ```
 
 ---
@@ -214,6 +260,9 @@ python scripts/run_migrations.py
 
 # 4. Backfill trades + sync holdings
 python scripts/backfill_trades.py
+
+# 5. FIFO lot engine + reconciliation
+python scripts/run_fifo.py
 ```
 
 ### Verify data in Neon
@@ -221,7 +270,9 @@ python scripts/backfill_trades.py
 ```sql
 SELECT COUNT(*) FROM dhan_trades;
 SELECT COUNT(*) FROM holdings_current;
+SELECT COUNT(*) FROM lots WHERE status = 'open';
 SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1;
+SELECT * FROM daily_trade_rollup ORDER BY trade_date DESC LIMIT 10;
 ```
 
 ---
@@ -256,7 +307,11 @@ SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1;
 
 ### `scripts/backfill_trades.py`
 
-Orchestrates: auth → sync_run → monthly trade fetch → ingest → holdings sync → finalize.
+Orchestrates: auth → sync_run → monthly trade fetch → ingest → holdings sync → stale duplicate check.
+
+### `scripts/run_fifo.py`
+
+Rebuilds `lots` + `lot_allocations` from `dhan_trades`, reconciles vs holdings, writes `output/reconciliation_latest.json`.
 
 ---
 
@@ -283,17 +338,11 @@ Documented in [`docs/OBSERVATIONS.md`](docs/OBSERVATIONS.md) and [`docs/DHAN_API
 
 ---
 
-## What's next — Phase 3
+## What's next — Phase 4
 
-Phase 3 builds the FIFO lot engine. Full plan: [`docs/PHASE_3_PLAN.md`](docs/PHASE_3_PLAN.md)
+Daily GitHub Actions cron: backfill → FIFO → reconcile. Credentials in GitHub Secrets; `DHAN_REUSE_ACCESS_TOKEN=false` in production.
 
-- Normalize trades from `dhan_trades` (filter CNC / NSE_EQ)
-- BUY → create lot; SELL → consume lots (FIFO)
-- Handle IPO rows (`orderId`/`price` = 0) — see [`docs/OBSERVATIONS.md`](docs/OBSERVATIONS.md) §1
-- Handle T+1 settlement lag — reconcile vs `available_qty`, not `total_qty` — see §2
-- Calculate long-term conversion date per lot (>12 months from purchase)
-- Reconcile open quantities against `holdings_current.available_qty` by ISIN (pending Dhan confirm)
-- Validate against your transaction CSV
+Optional: set `NTFY_TOPIC` in `.env` for push alerts on ingest warnings or reconciliation failure.
 
 ---
 

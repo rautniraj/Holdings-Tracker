@@ -1,6 +1,6 @@
 # Phase 3 — FIFO Lot Engine & Reconciliation
 
-**Status:** Not started  
+**Status:** Complete (12-Aug-2026)  
 **Prerequisite:** Phase 2 complete (Neon PostgreSQL, `dhan_trades`, `holdings_current`)
 
 Reference: [`.cursor/rules/holdings-tracker-plan.mdc`](../.cursor/rules/holdings-tracker-plan.mdc)  
@@ -27,7 +27,7 @@ Reconstruct **open lots** from `dhan_trades` using FIFO, calculate **long-term c
 Only process rows where:
 
 - `product_type = 'CNC'`
-- `exchange_segment = 'NSE_EQ'`
+- `exchange_segment IN ('NSE_EQ', 'BSE_EQ')`
 - `transaction_type IN ('BUY', 'SELL')`
 
 Sort by `exchange_time` ascending, then by `id` for stable ordering.
@@ -38,8 +38,9 @@ See [`OBSERVATIONS.md`](OBSERVATIONS.md):
 
 1. **IPO allotment** — `orderId`/`securityId`/`price` = 0; use `isin` + `tradedQuantity`; cost basis may be 0 / unknown
 2. **`exchangeTradeId` always `"0"`** — dedup uses composite key including `isin`
-3. **Partial fills** — same `orderId`, multiple rows possible
-4. **T+1 settlement lag** — after SELL, trade history updates before holdings; do not use `total_qty` for reconciliation (see [`OBSERVATIONS.md`](OBSERVATIONS.md) §2)
+3. **Partial fills / iceberg** — same `orderId`, multiple rows possible
+4. **T+1 settlement lag** — after SELL, trade history and holdings update on different schedules; do not use `total_qty` for reconciliation (see [`OBSERVATIONS.md`](OBSERVATIONS.md) §2)
+5. **BSE_EQ trades** — must be included in FIFO (holdings are per ISIN across exchanges)
 
 ---
 
@@ -54,7 +55,7 @@ See [`OBSERVATIONS.md`](OBSERVATIONS.md):
 | `security_id` | TEXT | From trade; may be `"0"` for IPO |
 | `custom_symbol` | TEXT | Display |
 | `purchase_date` | TIMESTAMPTZ | From BUY `exchange_time` |
-| `lt_conversion_date` | DATE | purchase_date + 12 months + 1 day (calendar) |
+| `lt_conversion_date` | DATE | purchase_date + 12 calendar months + 1 day |
 | `original_quantity` | INTEGER | Qty at lot creation |
 | `remaining_quantity` | INTEGER | Qty still open |
 | `cost_per_share` | NUMERIC | From `traded_price`; 0 for IPO → flag |
@@ -96,9 +97,11 @@ for trade in sorted_trades:
       if lot.remaining == 0: mark closed
 ```
 
-**LT conversion date:** lot becomes long-term the day after 12 calendar months from `purchase_date` (not 365 days).
+**LT conversion date:** lot becomes long-term the day after 12 **calendar** months from `purchase_date` (not 365 days). Per-ISIN overrides in `config/lt_exceptions.json`.
 
 **IPO lots:** create lot with `cost_basis_unknown = true` when `traded_price = 0` and `order_id = '0'`.
+
+**Rebuild strategy:** full truncate-and-rebuild of `lots` + `lot_allocations` on each FIFO run.
 
 ---
 
@@ -113,47 +116,65 @@ holdings_qty  = holdings_current.available_qty   # working hypothesis — match 
 
 **Do not use `total_qty`** — can be stale after a SELL while settlement is in progress (see [`OBSERVATIONS.md`](OBSERVATIONS.md) §2).
 
-**Pending Dhan confirmation:** `available_qty` vs `dp_qty` vs `total_qty`. Questions in [`DHAN_API_QUESTIONS.md`](DHAN_API_QUESTIONS.md) §7. Update reconciliation code once Dhan responds.
+**Pending Dhan confirmation:** `available_qty` vs `dp_qty` vs `total_qty`. Questions in [`DHAN_API_QUESTIONS.md`](DHAN_API_QUESTIONS.md) §7.
 
 | Result | Action |
 |--------|--------|
-| Match | Success |
-| Mismatch | Fail loudly — print ISIN, FIFO qty, Dhan qty, diff |
-
-Use **ISIN** as reconciliation key (not `security_id` — IPO rows have `securityId: "0"`).
-
-**Timing:** run holdings sync after trades are up to date; allow for T+1 lag when interpreting mismatches on recent SELLs.
+| Match | Success — write `output/reconciliation_latest.json` |
+| Mismatch | Fail loudly — print all ISINs; NTFY if configured |
 
 ---
 
-## CSV validation (optional)
+## Trade ingest hardening (added during Phase 3)
 
-Compare FIFO output against user's transaction CSV:
+See [`OBSERVATIONS.md`](OBSERVATIONS.md) §4:
 
-- Match by ISIN + date + qty + side
-- Report discrepancies
-- CSV is validation only; `dhan_trades` remains authoritative
+- **Tier 1:** `ON CONFLICT DO UPDATE` for metadata (`raw_payload`, charges, symbol) on same 7-key
+- **Tier 2:** stale duplicate detection after backfill → `output/ingest_warnings_latest.json`
+- **View:** `daily_trade_rollup` — per ISIN/day BUY/SELL totals (reporting only)
 
 ---
 
-## Files to add
+## CSV validation (optional — skipped)
+
+Deferred by choice. `dhan_trades` remains authoritative.
+
+---
+
+## Files added
 
 | File | Purpose |
 |------|---------|
 | `migrations/003_lots_schema.sql` | `lots`, `lot_allocations` tables |
+| `migrations/004_daily_trade_rollup_view.sql` | Reporting view |
 | `src/fifo_engine.py` | Core FIFO logic |
 | `src/reconciliation.py` | Compare FIFO vs `holdings_current` |
-| `scripts/run_fifo.py` | Build lots from `dhan_trades`, run reconciliation |
+| `src/lt_rules.py` | LT conversion + `config/lt_exceptions.json` |
+| `src/ingest_warnings.py` | Tier 2 stale duplicate detection |
+| `src/ntfy.py` | Push notifications (wired; full ops in Phase 5) |
+| `config/lt_exceptions.json` | Per-ISIN LT month overrides |
+| `scripts/run_fifo.py` | Build lots + reconciliation CLI |
 
 ---
 
-## Execution order
+## How to run
 
-1. Migration `003_lots_schema.sql`
-2. `fifo_engine.py` — read trades, write lots + allocations
-3. `reconciliation.py` — compare vs holdings
-4. `run_fifo.py` — CLI orchestrator
-5. Validate against CSV (manual step)
+```bash
+./run_holdings_tracker.sh
+# or: backfill_trades.py → run_fifo.py
+```
+
+---
+
+## Live results (12-Aug-2026)
+
+| Metric | Value |
+|--------|-------|
+| CNC trades processed (NSE_EQ + BSE_EQ) | 194 |
+| Lots created | 167 (118 open, 49 closed) |
+| Allocations | 51 |
+| Reconciliation | **25/25 ISINs matched** |
+| Ingest warnings | 0 |
 
 ---
 
@@ -161,16 +182,23 @@ Compare FIFO output against user's transaction CSV:
 
 - Corporate actions (bonus, split, merger)
 - Cost basis override UI
-- NTFY alerts (Phase 5)
+- CSV validation
 - GitHub Actions cron (Phase 4)
+- Full NTFY ops hardening (Phase 5)
 
 ---
 
 ## Success criteria
 
-- [ ] All CNC NSE_EQ trades processed in chronological order
-- [ ] Open lot qty per ISIN matches `holdings_current.available_qty` (pending Dhan confirm on qty field)
-- [ ] Each open lot has `lt_conversion_date`
-- [ ] IPO lots flagged with `cost_basis_unknown`
-- [ ] Oversell or negative remaining qty fails loudly
-- [ ] CSV validation documented (pass/fail noted)
+- [x] All CNC NSE_EQ + BSE_EQ trades processed in chronological order
+- [x] Open lot qty per ISIN matches `holdings_current.available_qty` (25/25 on 12-Aug-2026; qty field pending Dhan confirm)
+- [x] Each open lot has `lt_conversion_date`
+- [x] IPO lots flagged with `cost_basis_unknown`
+- [x] Oversell or negative remaining qty fails loudly
+- [x] CSV validation — skipped (not required)
+
+---
+
+## Next — Phase 4
+
+GitHub Actions daily cron: backfill → FIFO → reconcile. See approved plan.

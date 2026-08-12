@@ -158,6 +158,74 @@ Phase 2 stores **all** qty fields as returned — no T+1 logic at ingest time. B
 
 ---
 
+## 3. BSE_EQ trades excluded from NSE-only FIFO filter
+
+**Date observed:** 2026-08-12  
+**ISIN:** `INF109KC1Y56` (ICICI Pru Silver ETF)
+
+Reconciliation showed FIFO open qty **51** vs holdings **52** (diff −1).
+
+### Root cause
+
+One CNC **BSE_EQ** BUY was in `dhan_trades` but Phase 3 FIFO initially filtered only `exchange_segment = 'NSE_EQ'`:
+
+| Trade | Segment | Qty |
+|-------|---------|-----|
+| 2025-09-25 BUY | BSE_EQ | 1 |
+| All other trades | NSE_EQ | net 51 open after FIFO |
+
+Holdings API reports **total demat qty across exchanges** by ISIN, so the BSE share counted toward 52 while FIFO ignored it.
+
+### Fix
+
+FIFO input filter now includes **`BSE_EQ`** alongside **`NSE_EQ`** for CNC delivery trades. Lots are still grouped by **ISIN**, so NSE and BSE fills for the same stock share one FIFO queue.
+
+---
+
+## 4. Trade ingest policy — upsert + stale duplicate detection
+
+**Date documented:** 2026-08-12
+
+### Row identity (unchanged)
+
+Dedup / unique key on `dhan_trades`:
+
+```
+(order_id, exchange_time, transaction_type, traded_quantity, traded_price, security_id, isin)
+```
+
+Partial fills (same `order_id`, different qty/time/price) remain **separate rows**. Iceberg orders are **not** flagged.
+
+### Tier 1 — metadata upsert on re-fetch
+
+`ON CONFLICT` on the key above **`DO UPDATE`** mutable fields (`raw_payload`, charges, symbol, etc.) when `raw_payload` changed.
+
+Key fields (qty, price, time) are **not** updated — they define identity.
+
+Ingest counts: `inserted` | `updated` | `unchanged`.
+
+### Tier 2 — stale duplicate warnings (not auto-fix)
+
+After each backfill, compare latest API trades vs DB **per group** `(order_id, isin, transaction_type)` using the **same 7-key** as ingest:
+
+```
+(order_id, exchange_time, transaction_type, traded_quantity, traded_price, security_id, isin)
+```
+
+**Warn** when DB has **more 7-key rows** than the latest API for that group (possible Dhan correction leaving a stale row). IPO rows use the same rule (`order_id` may be `"0"`).
+
+**Do not warn** when API and DB have the same 7-key set (partial fills / iceberg).
+
+Output: `output/ingest_warnings_latest.json`. Exit code 1 if warnings. NTFY if `NTFY_TOPIC` set.
+
+**Fix:** manually delete stale `dhan_trades` row(s) listed in `db_trade_ids`, then re-run FIFO.
+
+### Daily rollup (reporting only)
+
+SQL view `daily_trade_rollup`: per ISIN, per day, sum of BUY/SELL qty. Not used by FIFO or reconciliation.
+
+---
+
 ## Related
 
 - [`DHAN_API_QUESTIONS.md`](DHAN_API_QUESTIONS.md) — `exchangeTradeId` always `"0"`, null placeholders
@@ -172,3 +240,5 @@ Phase 2 stores **all** qty fields as returned — no T+1 logic at ingest time. B
 | 2026-08-11 | IPO allotment BUY rows: `orderId`/`securityId`/`price` zero; ISIN + qty present |
 | 2026-08-12 | Added `isin` to dedup key after IPO collision risk identified |
 | 2026-08-12 | T+1 SELL lag: trade history vs holdings; reconcile via `availableQty` (pending Dhan confirm) |
+| 2026-08-12 | BSE_EQ CNC trade missed by NSE-only FIFO filter; include BSE_EQ (INF109KC1Y56) |
+| 2026-08-12 | Trade ingest: metadata upsert (Tier 1) + stale duplicate warnings (Tier 2) |
