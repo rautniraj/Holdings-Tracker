@@ -151,7 +151,7 @@ Deferred by choice. `dhan_trades` remains authoritative.
 | `src/reconciliation.py` | Compare FIFO vs `holdings_current` |
 | `src/lt_rules.py` | LT conversion + `config/lt_exceptions.json` |
 | `src/ingest_warnings.py` | Tier 2 stale duplicate detection |
-| `src/ntfy.py` | Push notifications (wired; full ops in Phase 5) |
+| `src/ntfy.py` | Push notifications (wired; full ops in Phase 6) |
 | `config/lt_exceptions.json` | Per-ISIN LT month overrides |
 | `scripts/run_fifo.py` | Build lots + reconciliation CLI |
 
@@ -183,8 +183,9 @@ Deferred by choice. `dhan_trades` remains authoritative.
 - Corporate actions (bonus, split, merger)
 - Cost basis override UI
 - CSV validation
-- GitHub Actions cron (Phase 4)
-- Full NTFY ops hardening (Phase 5)
+- Daily sync script (Phase 4)
+- GitHub Actions cron (Phase 5)
+- Full NTFY ops hardening (Phase 6)
 
 ---
 
@@ -201,4 +202,4 @@ Deferred by choice. `dhan_trades` remains authoritative.
 
 ## Next — Phase 4
 
-GitHub Actions daily cron: backfill → FIFO → reconcile. See approved plan.
+Daily sync: incremental trade ingest (`MAX(exchange_time)+1` → today) + holdings snapshot sync. See [`PHASE_4_PLAN.md`](PHASE_4_PLAN.md).

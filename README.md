@@ -13,10 +13,11 @@ Dhan shows ST/LT classification only after conversion. This project reconstructs
 | **Phase 1** | Dhan API & authentication validation | **Complete** |
 | **Phase 2** | Neon PostgreSQL + trade/holdings ingestion | **Complete** |
 | **Phase 3** | FIFO lot engine + reconciliation | **Complete** |
-| Phase 4 | GitHub Actions daily cron | Not started |
-| Phase 5 | NTFY notifications + ops hardening | Not started |
+| **Phase 4** | Daily sync — incremental trades + holdings snapshot | Not started |
+| Phase 5 | GitHub Actions daily cron | Not started |
+| Phase 6 | NTFY notifications + ops hardening | Not started |
 
-Planning docs: [`docs/PHASE_1_PLAN.md`](docs/PHASE_1_PLAN.md) · [`docs/PHASE_2_PLAN.md`](docs/PHASE_2_PLAN.md) · [`docs/PHASE_3_PLAN.md`](docs/PHASE_3_PLAN.md)  
+Planning docs: [`docs/PHASE_1_PLAN.md`](docs/PHASE_1_PLAN.md) · [`docs/PHASE_2_PLAN.md`](docs/PHASE_2_PLAN.md) · [`docs/PHASE_3_PLAN.md`](docs/PHASE_3_PLAN.md) · [`docs/PHASE_4_PLAN.md`](docs/PHASE_4_PLAN.md)  
 Planning reference: `Dhan-Project---Serious-Problem-Troubleshooting-2026-08-11.html`  
 API reference (local export): `dhan-api-docs.md`
 
@@ -332,7 +333,7 @@ Documented in [`docs/OBSERVATIONS.md`](docs/OBSERVATIONS.md) and [`docs/DHAN_API
 
 - `.env` and `output/` are gitignored
 - `output/auth_response.json` contains a live JWT — treat as secret
-- Store production credentials in **GitHub Secrets** (Phase 4), not in the repo
+- Store production credentials in **GitHub Secrets** (Phase 5), not in the repo
 - Set `DHAN_REUSE_ACCESS_TOKEN=false` in production
 - Rotate PIN/TOTP secret if credentials were ever exposed
 
@@ -340,9 +341,9 @@ Documented in [`docs/OBSERVATIONS.md`](docs/OBSERVATIONS.md) and [`docs/DHAN_API
 
 ## What's next — Phase 4
 
-Daily GitHub Actions cron: backfill → FIFO → reconcile. Credentials in GitHub Secrets; `DHAN_REUSE_ACCESS_TOKEN=false` in production.
+Daily sync script: incremental trade ingest from `MAX(exchange_time)+1` through today, plus holdings snapshot sync (including cleanup for fully sold positions). Prerequisite: one-time backfill via `DHAN_TRADE_FROM`.
 
-Optional: set `NTFY_TOPIC` in `.env` for push alerts on ingest warnings or reconciliation failure.
+Phase 5 will schedule this via GitHub Actions. Phase 6 adds NTFY ops hardening.
 
 ---
 
