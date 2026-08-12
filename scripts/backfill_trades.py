@@ -17,9 +17,14 @@ from src.config import Settings
 from src.db import get_connection
 from src.dhan_client import DhanClient
 from src.holdings_sync import sync_holdings
+from src.ingest_warnings import (
+    detect_stale_trade_duplicates,
+    write_ingest_warnings,
+)
+from src.ntfy import send_notification
 from src.trade_ingest import ingest_trades
 
-DEFAULT_TRADE_FROM = date(2025, 9, 20)
+DEFAULT_TRADE_FROM = date(2025, 9, 1)
 
 
 def monthly_chunks(start: date, end: date) -> list[tuple[date, date]]:
@@ -124,10 +129,16 @@ def main() -> int:
     sync_run_id: int | None = None
     total_fetched = 0
     total_inserted = 0
-    total_skipped = 0
+    total_updated = 0
+    total_unchanged = 0
+    all_api_trades: list[dict] = []
+    ingest_warnings = []
+    warnings_path: Path | None = None
+    holdings_result = None
+    run_at = datetime.now().astimezone()
 
     try:
-        print("\n[1/3] Authenticating with TOTP...")
+        print("\n[1/4] Authenticating with TOTP...")
         auth_payload, reused = get_access_token(settings)
         print(f"  {'Reusing cached' if reused else 'Generated new'} access token")
         client = DhanClient(auth_payload["accessToken"], settings)
@@ -136,7 +147,7 @@ def main() -> int:
             sync_run_id = create_sync_run(conn, trade_from, trade_to)
             print(f"  sync_run_id: {sync_run_id}")
 
-            print("\n[2/3] Fetching trade history...")
+            print("\n[2/4] Fetching trade history...")
             for index, (chunk_from, chunk_to) in enumerate(chunks):
                 if index > 0 and settings.trade_history_sleep_seconds > 0:
                     time.sleep(settings.trade_history_sleep_seconds)
@@ -148,21 +159,38 @@ def main() -> int:
                     chunk_from.isoformat(),
                     chunk_to.isoformat(),
                 )
+                all_api_trades.extend(trades)
                 result = ingest_trades(conn, trades, sync_run_id=sync_run_id)
 
                 total_fetched += result.fetched
                 total_inserted += result.inserted
-                total_skipped += result.skipped
+                total_updated += result.updated
+                total_unchanged += result.unchanged
 
                 print(
                     f"    pages={pages_fetched} fetched={result.fetched} "
-                    f"inserted={result.inserted} skipped={result.skipped}"
+                    f"inserted={result.inserted} updated={result.updated} "
+                    f"unchanged={result.unchanged}"
                 )
 
-            print("\n[3/3] Fetching holdings...")
+            print("\n[3/4] Fetching holdings...")
             holdings = client.get_holdings()
             holdings_result = sync_holdings(conn, holdings)
             print(f"  upserted={holdings_result.upserted}")
+
+            print("\n[4/4] Checking for stale trade duplicates...")
+            ingest_warnings = detect_stale_trade_duplicates(conn, all_api_trades)
+            warnings_path = write_ingest_warnings(
+                ingest_warnings,
+                run_at=run_at,
+                sync_run_id=sync_run_id,
+            )
+            if ingest_warnings:
+                print(f"  warnings: {len(ingest_warnings)} (see {warnings_path})")
+                for warning in ingest_warnings:
+                    print(f"    - {warning.isin}: {warning.message}")
+            else:
+                print(f"  no warnings (report: {warnings_path})")
 
             finalize_sync_run(
                 conn,
@@ -170,18 +198,30 @@ def main() -> int:
                 status="success",
                 trades_fetched=total_fetched,
                 trades_inserted=total_inserted,
-                trades_skipped=total_skipped,
+                trades_skipped=total_unchanged,
+            )
+
+        if ingest_warnings:
+            send_notification(
+                settings,
+                title="Holdings Tracker — ingest warnings",
+                message=(
+                    f"{len(ingest_warnings)} stale trade duplicate(s) detected.\n"
+                    f"See ingest_warnings_latest.json — review and re-run FIFO."
+                ),
+                priority="high",
+                tags="warning",
             )
 
         print("\n" + "=" * 60)
         print("Backfill complete.")
         print(
             f"Trades: fetched={total_fetched} inserted={total_inserted} "
-            f"skipped={total_skipped}"
+            f"updated={total_updated} unchanged={total_unchanged}"
         )
-        print(f"Holdings upserted: {holdings_result.upserted}")
+        print(f"Holdings upserted: {holdings_result.upserted if holdings_result else 0}")
         print("=" * 60)
-        return 0
+        return 1 if ingest_warnings else 0
 
     except Exception as exc:
         if sync_run_id is not None:
@@ -193,12 +233,19 @@ def main() -> int:
                         status="failed",
                         trades_fetched=total_fetched,
                         trades_inserted=total_inserted,
-                        trades_skipped=total_skipped,
+                        trades_skipped=total_unchanged,
                         error_message=str(exc),
                     )
             except Exception:
                 pass
 
+        send_notification(
+            settings,
+            title="Holdings Tracker — backfill failed",
+            message=str(exc),
+            priority="urgent",
+            tags="x",
+        )
         print(f"\nERROR: {exc}", file=sys.stderr)
         return 1
 

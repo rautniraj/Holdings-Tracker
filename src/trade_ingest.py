@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Any
 
 from psycopg2.extensions import connection as PgConnection
 from psycopg2.extras import Json
@@ -67,7 +69,30 @@ INSERT INTO dhan_trades (
   %(sync_run_id)s
 )
 ON CONFLICT (order_id, exchange_time, transaction_type, traded_quantity, traded_price, security_id, isin)
-DO NOTHING
+DO UPDATE SET
+  dhan_client_id = EXCLUDED.dhan_client_id,
+  exchange_order_id = EXCLUDED.exchange_order_id,
+  exchange_trade_id = EXCLUDED.exchange_trade_id,
+  exchange_segment = EXCLUDED.exchange_segment,
+  product_type = EXCLUDED.product_type,
+  order_type = EXCLUDED.order_type,
+  custom_symbol = EXCLUDED.custom_symbol,
+  instrument = EXCLUDED.instrument,
+  sebi_tax = EXCLUDED.sebi_tax,
+  stt = EXCLUDED.stt,
+  brokerage_charges = EXCLUDED.brokerage_charges,
+  service_tax = EXCLUDED.service_tax,
+  exchange_transaction_charges = EXCLUDED.exchange_transaction_charges,
+  stamp_duty = EXCLUDED.stamp_duty,
+  create_time = EXCLUDED.create_time,
+  update_time = EXCLUDED.update_time,
+  drv_expiry_date = EXCLUDED.drv_expiry_date,
+  drv_option_type = EXCLUDED.drv_option_type,
+  drv_strike_price = EXCLUDED.drv_strike_price,
+  raw_payload = EXCLUDED.raw_payload,
+  sync_run_id = EXCLUDED.sync_run_id
+WHERE dhan_trades.raw_payload IS DISTINCT FROM EXCLUDED.raw_payload
+RETURNING (xmax = 0) AS inserted
 """
 
 
@@ -75,7 +100,8 @@ DO NOTHING
 class IngestResult:
     fetched: int
     inserted: int
-    skipped: int
+    updated: int
+    unchanged: int
 
 
 def parse_exchange_time(value: str) -> datetime:
@@ -84,9 +110,36 @@ def parse_exchange_time(value: str) -> datetime:
         raise ValueError("exchangeTime is missing or NA")
 
     if "T" in normalized:
-        return datetime.fromisoformat(normalized)
+        parsed = datetime.fromisoformat(normalized)
+    else:
+        parsed = datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S")
 
-    return datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S")
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _normalize_price(value) -> Decimal:
+    return Decimal(str(value)).quantize(Decimal("0.0001"))
+
+
+def dedup_key_from_row(row: dict) -> tuple[Any, ...]:
+    exchange_time = row["exchange_time"]
+    if isinstance(exchange_time, datetime) and exchange_time.tzinfo is not None:
+        exchange_time = exchange_time.astimezone(timezone.utc).replace(tzinfo=None)
+    return (
+        row["order_id"],
+        exchange_time,
+        row["transaction_type"],
+        int(row["traded_quantity"]),
+        _normalize_price(row["traded_price"]),
+        row["security_id"],
+        row["isin"],
+    )
+
+
+def dedup_key_from_api_trade(trade: dict) -> tuple[Any, ...]:
+    return dedup_key_from_row(_trade_row(trade, sync_run_id=None))
 
 
 def _trade_row(trade: dict, sync_run_id: int | None) -> dict:
@@ -151,15 +204,24 @@ def ingest_trades(
     sync_run_id: int | None = None,
 ) -> IngestResult:
     inserted = 0
-    skipped = 0
+    updated = 0
+    unchanged = 0
 
     with conn.cursor() as cur:
         for trade in trades:
             row = _trade_row(trade, sync_run_id)
             cur.execute(INSERT_TRADE_SQL, row)
-            if cur.rowcount:
+            result = cur.fetchone()
+            if result is None:
+                unchanged += 1
+            elif result[0]:
                 inserted += 1
             else:
-                skipped += 1
+                updated += 1
 
-    return IngestResult(fetched=len(trades), inserted=inserted, skipped=skipped)
+    return IngestResult(
+        fetched=len(trades),
+        inserted=inserted,
+        updated=updated,
+        unchanged=unchanged,
+    )
