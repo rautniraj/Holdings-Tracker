@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+DEFAULT_NTFY_SERVER = "https://ntfy.sh"
+
 
 def _required(name: str) -> str:
     value = os.getenv(name, "").strip()
@@ -36,9 +38,13 @@ class Settings:
     database_url: str | None
     trade_history_sleep_seconds: int
     reuse_access_token: bool
+    ntfy_topic: str | None
+    ntfy_server: str
 
     @classmethod
     def from_env(cls) -> "Settings":
+        ntfy_topic = os.getenv("NTFY_TOPIC", "").strip() or None
+        ntfy_server = os.getenv("NTFY_SERVER", DEFAULT_NTFY_SERVER).strip() or DEFAULT_NTFY_SERVER
         return cls(
             client_id=_required("DHAN_CLIENT_ID"),
             pin=_required("DHAN_PIN"),
@@ -53,4 +59,6 @@ class Settings:
             ),
             reuse_access_token=os.getenv("DHAN_REUSE_ACCESS_TOKEN", "false").strip().lower()
             in {"1", "true", "yes", "on"},
+            ntfy_topic=ntfy_topic,
+            ntfy_server=ntfy_server,
         )
