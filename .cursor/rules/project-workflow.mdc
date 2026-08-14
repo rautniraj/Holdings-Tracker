@@ -1,0 +1,47 @@
+---
+description: Neon connectivity, phase plan updates, and docs placement for observations and Dhan questions
+alwaysApply: true
+---
+
+# Project Workflow
+
+## Neon PostgreSQL — office LAN blocked
+
+Neon does **not** work on the office LAN. Before any Neon **read or write** (queries, migrations, MCP, CLI, ingestion, tests against live DB):
+
+1. **Stop** — do not connect or retry blindly.
+2. **Ask the user** to switch to personal internet (mobile hotspot or home network).
+3. **Wait for explicit confirmation** before proceeding.
+4. If a Neon operation fails with a network/timeout error, treat it as a possible LAN issue and ask again — do not assume credentials or schema are wrong.
+
+## Phase plans — keep updated
+
+When work advances, changes scope, or completes tasks, update the relevant phase plan under `docs/`:
+
+| Phase | File |
+|-------|------|
+| 1 | `docs/PHASE_1_PLAN.md` |
+| 2 | `docs/PHASE_2_PLAN.md` |
+| 3 | `docs/PHASE_3_PLAN.md` |
+
+Update **status**, completed checkboxes, decisions, and blockers in the same file — do not create parallel plan docs.
+
+## Dhan API questions
+
+If something is unclear or contradicts live API behavior and needs **Dhan team** input, add it to `docs/DHAN_API_QUESTIONS.md`:
+
+- One numbered section per topic
+- Include: what docs say, what we observed, specific questions
+- Cross-link related entries in `docs/OBSERVATIONS.md`
+
+Do not open GitHub issues or external tickets for Dhan questions — this file is the queue.
+
+## Observations from live data
+
+Record runtime findings (API quirks, data anomalies, reconciliation mismatches) in `docs/OBSERVATIONS.md`:
+
+- Date observed, ISIN/symbol when relevant
+- Sample payload or row when helpful
+- Implications for ingestion, dedup, or FIFO logic
+
+Do not bury observations in code comments or chat-only — persist them here.

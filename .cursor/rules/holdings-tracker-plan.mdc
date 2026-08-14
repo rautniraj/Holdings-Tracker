@@ -1,0 +1,72 @@
+---
+description: Holdings Tracker architecture, phases, and V1 constraints from approved plan
+alwaysApply: false
+---
+# Holdings Tracker — Approved Plan
+
+Reference: `Dhan-Project---Serious-Problem-Troubleshooting-2026-08-11.html` (ChatGPT planning transcript).
+
+**Do not jump phases.** Complete each phase fully before starting the next.
+
+## Phases (current numbering)
+
+1. **Phase 1 — Dhan API & Authentication** — **Complete**. Plan: `docs/PHASE_1_PLAN.md`
+2. **Phase 2 — Neon PostgreSQL + Trade/Holdings Ingestion** — **Complete**. Plan: `docs/PHASE_2_PLAN.md`
+3. **Phase 3 — FIFO & Lot Engine** — **Complete**. Plan: `docs/PHASE_3_PLAN.md`
+4. **Phase 4 — Daily sync (incremental trades + holdings snapshot)** — **Complete**. Plan: `docs/PHASE_4_PLAN.md`
+5. **Phase 5 — GitHub Actions daily cron**
+6. **Phase 6 — NTFY & Operations**
+
+## V1 Stack & Constraints
+
+| Area | Decision |
+|------|----------|
+| Language | Python |
+| Deployment | GitHub Actions (₹0) |
+| Database | Neon PostgreSQL (fallback: separate Git repo + SQLite) |
+| Auth | Dhan TOTP → access token |
+| Lot accounting | FIFO only |
+| Corporate actions | **Out of scope** (bonus, split, merger, etc.) |
+| Retries | Configurable max (default 5), **no exponential backoff**, **no rate-limit detection** |
+| Auth retries | Configurable max; failed auth must fail the entire workflow |
+| Notifications | NTFY |
+| Order APIs | **No** — read-only |
+
+## Core Business Rules
+
+- Long-term = held **more than 12 months** (not 365 days)
+- Track **lots**, not aggregate holdings — multiple buys of same stock convert on different dates
+- Store raw Dhan trades permanently; lot engine is a separate layer
+- Fail loudly on reconciliation mismatch, malformed responses, or negative remaining quantity — no silent data corruption
+- Dhan Trade History is recovery source if DB is lost; DB is optimization for incremental sync
+- Dedup key: `(order_id, exchange_time, transaction_type, traded_quantity, traded_price, security_id, isin)` — `isin` required for IPO rows where order/security IDs are `"0"`
+- Reconciliation (Phase 3): compare FIFO open qty vs `holdings_current.available_qty` by ISIN — **pending Dhan confirmation** (`availableQty` vs `dpQty` vs `totalQty`). See `docs/OBSERVATIONS.md` §2
+
+## Architecture
+
+```
+Dhan API (TOTP) → Python Service → Trade History + Holdings
+                                        ↓
+                                  dhan_trades + holdings_current
+                                        ↓
+                                  FIFO / Lot Engine (Phase 3)
+                                        ↓
+                                  lots + lot_allocations
+                                        ↓
+                              Daily sync (Phase 4)
+                                        ↓
+                              GitHub Actions cron (Phase 5)
+                                        ↓
+                                       NTFY (Phase 6)
+```
+
+## Live observations
+
+See `docs/OBSERVATIONS.md` — IPO allotment rows, T+1 settlement lag, dedup key implications.
+
+## Phase plans
+
+- `docs/PHASE_1_PLAN.md` — Dhan API validation (complete)
+- `docs/PHASE_2_PLAN.md` — PostgreSQL + ingestion (complete)
+- `docs/PHASE_3_PLAN.md` — FIFO lot engine (complete)
+- `docs/PHASE_4_PLAN.md` — Daily sync (complete)

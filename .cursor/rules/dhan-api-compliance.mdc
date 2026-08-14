@@ -1,0 +1,36 @@
+---
+description: Strictly follow DhanHQ API v2 documentation for all Dhan integrations
+alwaysApply: false
+---
+# Dhan API Compliance
+
+## Authoritative Sources (in order)
+
+1. `dhan-api-docs.md` in this repo (local export — check here first)
+2. https://docs.dhanhq.co/api/v2/
+3. https://dhanhq.co/docs/v2/
+
+Never guess endpoints, headers, field names, or auth flows. Read the docs before writing or changing any Dhan integration code.
+
+## Required Practices
+
+- Use exact base URLs, paths, and headers from the docs (e.g. `access-token` header, not `Authorization: Bearer`)
+- Match documented request/response field names exactly (`exchangeTradeId`, `tradedQuantity`, `exchangeTime`, etc.)
+- This project is **read-only**: Trade History, Holdings, Profile only — no order placement/modification/cancellation
+- Static IP whitelisting is **not required** for read-only statement APIs
+- Auth: TOTP via `POST https://auth.dhan.co/app/generateAccessToken` with `dhanClientId`, `pin`, `totp`
+- Trade History pagination: `GET /trades/{from-date}/{to-date}/{page-number}` starting at page `0`; do not assume termination fields — implement defensively from actual responses
+
+## APIs for This Project
+
+| Purpose | Endpoint |
+|---------|----------|
+| Auth sanity check | `GET /profile` |
+| Primary data source | `GET /trades/{from-date}/{to-date}/{page-number}` |
+| Reconciliation only | `GET /holdings` |
+
+Trade History is the authoritative event stream. Holdings is for reconciliation, not historical ledger reconstruction.
+
+## When Docs Are Unclear
+
+Stop and verify against `dhan-api-docs.md` or the official URLs. Do not invent fields, endpoints, or behavior. Phase 0/1 exists to validate real API responses before building business logic.
