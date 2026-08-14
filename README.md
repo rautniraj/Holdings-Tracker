@@ -13,7 +13,7 @@ Dhan shows ST/LT classification only after conversion. This project reconstructs
 | **Phase 1** | Dhan API & authentication validation | **Complete** |
 | **Phase 2** | Neon PostgreSQL + trade/holdings ingestion | **Complete** |
 | **Phase 3** | FIFO lot engine + reconciliation | **Complete** |
-| **Phase 4** | Daily sync — incremental trades + holdings snapshot | Not started |
+| **Phase 4** | Daily sync — incremental trades + holdings snapshot | **Complete** |
 | Phase 5 | GitHub Actions daily cron | Not started |
 | Phase 6 | NTFY notifications + ops hardening | Not started |
 
@@ -167,7 +167,8 @@ Holdings-Tracker/
 │   ├── phase1_validate.py           # Phase 1 — API validation
 │   ├── test_db_connection.py        # Verify Neon connectivity
 │   ├── run_migrations.py            # Apply SQL migrations
-│   ├── backfill_trades.py           # Fetch + ingest trades + holdings
+│   ├── backfill_trades.py           # One-time / recovery backfill
+│   ├── daily_sync.py                # Phase 4 — incremental daily sync
 │   └── run_fifo.py                  # Phase 3 — FIFO + reconciliation
 ├── src/
 │   ├── auth.py                      # TOTP auth + token reuse
@@ -175,7 +176,9 @@ Holdings-Tracker/
 │   ├── db.py                        # Postgres connection + migrations
 │   ├── dhan_client.py               # Profile, holdings, trade history
 │   ├── trade_ingest.py              # Upsert dhan_trades (7-key dedup)
-│   ├── holdings_sync.py             # Upsert holdings_current
+│   ├── holdings_sync.py             # Snapshot sync holdings_current
+│   ├── sync_range.py                # Incremental trade date cursor
+│   ├── sync_run.py                  # sync_runs audit helpers
 │   ├── fifo_engine.py               # FIFO lot builder
 │   ├── reconciliation.py            # Holdings reconciliation
 │   ├── lt_rules.py                  # LT conversion dates
@@ -259,8 +262,11 @@ python scripts/test_db_connection.py
 # 3. Apply schema migrations (safe to re-run)
 python scripts/run_migrations.py
 
-# 4. Backfill trades + sync holdings
+# 4. One-time backfill (set DHAN_TRADE_FROM in .env first)
 python scripts/backfill_trades.py
+
+# 4b. Daily sync (after backfill — incremental trades + holdings snapshot)
+python scripts/daily_sync.py
 
 # 5. FIFO lot engine + reconciliation
 python scripts/run_fifo.py
@@ -304,15 +310,25 @@ SELECT * FROM daily_trade_rollup ORDER BY trade_date DESC LIMIT 10;
 
 ### `src/holdings_sync.py`
 
-- `sync_holdings(conn, holdings)` — upsert into `holdings_current`
+- `sync_holdings_snapshot(conn, holdings)` — upsert + delete rows absent from API snapshot
+- `sync_holdings(conn, holdings)` — alias for snapshot sync
+
+### `src/sync_range.py`
+
+- `resolve_trade_sync_range(conn)` — `MAX(exchange_time)+1` → today (IST); raises if DB empty
+- `monthly_chunks(start, end)` — split date range for Trade History API
 
 ### `scripts/backfill_trades.py`
 
-Orchestrates: auth → sync_run → monthly trade fetch → ingest → holdings sync → stale duplicate check.
+One-time / recovery: auth → sync_run → monthly trade fetch → ingest → holdings snapshot → stale duplicate check.
+
+### `scripts/daily_sync.py`
+
+Daily incremental sync (Phase 4): cursor-based trade fetch + holdings snapshot. Requires prior backfill.
 
 ### `scripts/run_fifo.py`
 
-Rebuilds `lots` + `lot_allocations` from `dhan_trades`, reconciles vs holdings, writes `output/reconciliation_latest.json`.
+Rebuilds FIFO lots (incremental by default) and reconciles vs holdings. Flags: `--full` (force rebuild), `--incremental-only` (skip auto-rebuild on reconcile failure). Writes `output/reconciliation_latest.json`.
 
 ---
 
@@ -339,11 +355,11 @@ Documented in [`docs/OBSERVATIONS.md`](docs/OBSERVATIONS.md) and [`docs/DHAN_API
 
 ---
 
-## What's next — Phase 4
+## What's next — Phase 5
 
-Daily sync script: incremental trade ingest from `MAX(exchange_time)+1` through today, plus holdings snapshot sync (including cleanup for fully sold positions). Prerequisite: one-time backfill via `DHAN_TRADE_FROM`.
+Schedule `daily_sync.py` (and optionally FIFO/reconcile) via GitHub Actions daily cron. Credentials in GitHub Secrets; `DHAN_REUSE_ACCESS_TOKEN=false` in production.
 
-Phase 5 will schedule this via GitHub Actions. Phase 6 adds NTFY ops hardening.
+Phase 6 adds NTFY ops hardening.
 
 ---
 
