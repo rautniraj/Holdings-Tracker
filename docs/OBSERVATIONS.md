@@ -226,6 +226,117 @@ SQL view `daily_trade_rollup`: per ISIN, per day, sum of BUY/SELL qty. Not used 
 
 ---
 
+## 6. Trade History day-atomicity (incremental daily sync)
+
+**Date observed:** 2026-08-12  
+**Context:** Phase 4 daily sync cursor
+
+For a given **calendar day** (IST), Dhan Trade History appears to return **either all trades for that day or none** — not a partial day that grows on a later fetch.
+
+**Incremental cursor:**
+
+```
+trade_from = MAX(exchange_time)::date in IST + 1 day
+trade_to   = today in IST
+```
+
+If any row exists for day **D**, day **D** is treated as closed; the next fetch starts at **D + 1**.
+
+**Holiday lag example:** Trade placed Friday, not in API until Monday. DB max stays Thursday through Sat/Sun runs (empty fetches for Fri–Sun). Monday fetch returns Friday's trades (`exchange_time` still Friday).
+
+**Dedup safety net:** 7-field unique key + `ON CONFLICT DO UPDATE` makes accidental re-fetch idempotent.
+
+---
+
+## 7. Holdings snapshot sync — sold-out positions
+
+**Date observed:** 2026-08-12  
+**Context:** Phase 4 `sync_holdings_snapshot()`
+
+Dhan `/holdings` omits fully sold securities. Snapshot sync upserts the API response then **deletes** `holdings_current` rows whose `security_id` is absent. An empty API response (HTTP 200) clears the table — e.g. all positions sold. API/HTTP failures must fail before sync (no silent wipe on error).
+
+---
+
+## 8. Timestamp columns — TIMESTAMPTZ everywhere (leave as-is)
+
+**Date documented:** 2026-08-12  
+**Decision:** No schema migration to `TIMESTAMP WITHOUT TIME ZONE`. Document semantics instead.
+
+### Column types in use
+
+| Kind | Columns | Type | Meaning |
+|------|---------|------|---------|
+| Audit | `created_at`, `updated_at`, `started_at`, `finished_at`, `applied_at` | `TIMESTAMPTZ` | When the row was written/updated (Postgres `now()` — a real instant) |
+| Business | `exchange_time`, `purchase_date` | `TIMESTAMPTZ` | Event time from Dhan / derived from trade (IST wall clock in practice) |
+| Calendar | `lt_conversion_date`, `trade_from`, `trade_to` | `DATE` | Calendar date only — no timezone |
+
+All tables use the same audit pattern (`DEFAULT now()` + `set_updated_at()` trigger).
+
+### Why Neon shows UTC
+
+`TIMESTAMPTZ` is stored as an absolute instant; many clients (including Neon console) **display in UTC**. That is normal — not a sign that audit times are “wrong.”
+
+### Business times vs audit times
+
+- **Audit** (`created_at`, etc.): system-defined at insert/update. UTC internally is fine; means “when did we persist this row.”
+- **Business** (`exchange_time`): from Dhan API, typically strings like `2025-10-17T13:09:45` with **no timezone** — interpret as **IST** (NSE/BSE local time). Ingest strips tz if present (`src/trade_ingest.py` → `parse_exchange_time`).
+
+Do not treat `exchange_time` and `created_at` as the same kind of timestamp.
+
+### Calendar-day logic uses IST explicitly
+
+Daily sync cursor and trade-day grouping must not rely on UTC display:
+
+```sql
+MAX((exchange_time AT TIME ZONE 'Asia/Kolkata')::date)
+```
+
+See §6. The `daily_trade_rollup` view uses `exchange_time::date` without IST conversion — reporting only; do not use it for sync cursor logic.
+
+### Future work (out of scope for now)
+
+If business timestamps ever need stricter typing, migrate **`exchange_time` / `purchase_date` only** to `TIMESTAMP WITHOUT TIME ZONE` documented as IST — not audit columns. GitHub Actions (Phase 5) runs in UTC; audit columns should stay `TIMESTAMPTZ`.
+
+---
+
+## 9. Incremental FIFO lot engine
+
+**Date documented:** 2026-08-12  
+**Context:** Daily `run_fifo.py` after Phase 4 daily sync
+
+### Previous behaviour
+
+Full rebuild every run: `TRUNCATE lots, lot_allocations` → reprocess **all** CNC NSE/BSE trades from scratch.
+
+### Current behaviour
+
+**Incremental (default):** process only FIFO-eligible trades **not** in `fifo_processed_trades`, in `(exchange_time, id)` order. Open lots loaded from DB per ISIN (FIFO queue). BUY → INSERT lot; SELL → UPDATE lots + INSERT allocations.
+
+**No-op:** zero unprocessed trades → skip lot writes, reconcile only.
+
+**Full rebuild** when:
+
+| Trigger | Action |
+|---------|--------|
+| First bootstrap (`lots` empty, unprocessed trades exist) | Full rebuild |
+| `fifo_processed_trades` empty but `lots` non-empty (post-migration) | Full rebuild |
+| `lt_rules_hash` ≠ stored hash (`config/lt_exceptions.json` changed) | Full rebuild |
+| Reconciliation fails after incremental | Auto full rebuild **once**, reconcile again |
+| Still failing after rebuild | Fail loudly + NTFY |
+| Manual | `python scripts/run_fifo.py --full` |
+
+**Stale trade fix:** deleting a `dhan_trades` row CASCADE-removes its `fifo_processed_trades` marker → next run detects state mismatch → full rebuild.
+
+### Why not `WHERE id > cursor`
+
+Late-arriving trades (holiday lag) have a **high `id`** but **earlier `exchange_time`**. Unprocessed set + chronological sort handles this; see §6.
+
+### Reconciliation
+
+Unchanged — cheap `SUM(remaining_quantity)` vs `SUM(available_qty)` by ISIN after incremental or full FIFO.
+
+---
+
 ## Related
 
 - [`DHAN_API_QUESTIONS.md`](DHAN_API_QUESTIONS.md) — `exchangeTradeId` always `"0"`, null placeholders
@@ -242,3 +353,6 @@ SQL view `daily_trade_rollup`: per ISIN, per day, sum of BUY/SELL qty. Not used 
 | 2026-08-12 | T+1 SELL lag: trade history vs holdings; reconcile via `availableQty` (pending Dhan confirm) |
 | 2026-08-12 | BSE_EQ CNC trade missed by NSE-only FIFO filter; include BSE_EQ (INF109KC1Y56) |
 | 2026-08-12 | Trade ingest: metadata upsert (Tier 1) + stale duplicate warnings (Tier 2) |
+| 2026-08-12 | Phase 4: day-atomic trade cursor; holdings snapshot delete for sold-out |
+| 2026-08-12 | Timestamp convention: TIMESTAMPTZ as-is; business times IST, audit times instant (§8) |
+| 2026-08-12 | Incremental FIFO via fifo_processed_trades; full rebuild fallback (§9) |
